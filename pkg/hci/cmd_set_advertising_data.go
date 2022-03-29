@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"log"
 )
 
 type HCISetAdvertisingDataCommandPacket struct {
@@ -24,8 +23,6 @@ func (p *HCISetAdvertisingDataCommandPacket) Marshal() ([]byte, error) {
 	if len(ads) > 31 {
 		return nil, io.ErrShortWrite
 	}
-
-	log.Printf("%x", ads)
 
 	buf := make([]byte, 36)
 	buf[0] = byte(PacketTypeCommand)

@@ -105,28 +105,32 @@ func main() {
 		go func() {
 			l2capconn := l2cap.NewConn(conn)
 			for {
-				channel, err := l2capconn.Accept()
+				signal, err := l2capconn.Accept()
+				if err != nil {
+					panic(err)
+				}
+				if signal.PSM != 0x0080 {
+					if err := signal.Reject(l2cap.LECreditBasedConnectionResultRefusedSPSMNotSupported); err != nil {
+						panic(err)
+					}
+					continue
+				}
+				channel, err := signal.Approve(false, math.MaxUint16)
 				if err != nil {
 					panic(err)
 				}
 				go func() {
-					switch channel.PSM {
-					case 0x0080:
-						channel.Approve(false, math.MaxUint16)
-						buf := make([]byte, math.MaxUint16)
-						for {
-							n, err := channel.Read(buf)
-							if err != nil {
-								break
-							}
-							log.Printf("got %d bytes: %x", n, buf[:n])
-
-							if _, err := channel.Write(buf[:n]); err != nil {
-								panic(err)
-							}
+					buf := make([]byte, math.MaxUint16)
+					for {
+						n, err := channel.Read(buf)
+						if err != nil {
+							break
 						}
-					default:
-						channel.Reject(l2cap.LECreditBasedConnectionResultRefusedSPSMNotSupported)
+						log.Printf("got %d bytes: %x", n, buf[:n])
+
+						if _, err := channel.Write(buf[:n]); err != nil {
+							panic(err)
+						}
 					}
 				}()
 			}

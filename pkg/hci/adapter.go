@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"sync"
 
 	"github.com/google/uuid"
 )
@@ -12,10 +13,21 @@ type Adapter struct {
 	*Socket
 
 	onPacket map[string]func(Packet, error)
+
+	ACLMTU                  uint16
+	ACLPacketsRemaining     uint16
+	ACLPacketsRemainingCond *sync.Cond
+	ACLPacketsPending       map[uint16]uint16
 }
 
 func NewConn(s *Socket) *Adapter {
-	a := &Adapter{Socket: s, onPacket: make(map[string]func(Packet, error))}
+	a := &Adapter{
+		Socket:                  s,
+		onPacket:                make(map[string]func(Packet, error)),
+		ACLMTU:                  1023,
+		ACLPacketsRemainingCond: sync.NewCond(&sync.Mutex{}),
+		ACLPacketsPending:       make(map[uint16]uint16),
+	}
 	go func() {
 		for {
 			p, err := a.ReadPacket()
@@ -24,6 +36,21 @@ func NewConn(s *Socket) *Adapter {
 					cb(nil, err)
 				}
 				return
+			}
+			switch p := p.(type) {
+			case *NumberOfCompletedPacketsEventPacket:
+				a.ACLPacketsRemainingCond.L.Lock()
+				for i := 0; i < int(p.NumHandles); i++ {
+					a.ACLPacketsRemaining += p.NumCompletedPackets[i]
+				}
+				a.ACLPacketsRemainingCond.Broadcast()
+				a.ACLPacketsRemainingCond.L.Unlock()
+			case *DisconnectionCompleteEventPacket:
+				a.ACLPacketsRemainingCond.L.Lock()
+				a.ACLPacketsRemaining += a.ACLPacketsPending[p.ConnectionHandle]
+				delete(a.ACLPacketsPending, p.ConnectionHandle)
+				a.ACLPacketsRemainingCond.Broadcast()
+				a.ACLPacketsRemainingCond.L.Unlock()
 			}
 			for _, cb := range a.onPacket {
 				cb(p, nil)
@@ -128,6 +155,12 @@ func (a *Adapter) LEReadBufferSize() (*LEReadBufferSizeResponse, error) {
 		r.ISODataPacketLength = binary.LittleEndian.Uint16(buf[4:6])
 		r.TotalNumISODataPackets = buf[6]
 	}
+	a.ACLMTU = r.LEACLDataPacketLength
+
+	a.ACLPacketsRemainingCond.L.Lock()
+	a.ACLPacketsRemaining = uint16(r.TotalNumLEACLDataPackets)
+	a.ACLPacketsRemainingCond.Broadcast()
+	a.ACLPacketsRemainingCond.L.Unlock()
 	return r, nil
 }
 
@@ -207,6 +240,10 @@ func (a *Adapter) Accept() (*Conn, error) {
 						return
 					}
 					switch q := q.(type) {
+					case *DisconnectionCompleteEventPacket:
+						if q.ConnectionHandle == c.ConnectionHandle {
+							delete(a.onPacket, cid)
+						}
 					case *ACLDataPacket:
 						if q.ConnectionHandle != p.ConnectionHandle {
 							// this packet is for another connection.
@@ -257,4 +294,39 @@ func (c *Conn) Read(buf []byte) (int, error) {
 	case err := <-c.errCh:
 		return 0, err
 	}
+}
+
+func (c *Conn) Write(buf []byte) (int, error) {
+	for i := 0; i < len(buf); i += int(c.ACLMTU) {
+		var pb uint8
+		if i > 0 {
+			pb = 1
+		}
+
+		j := i + int(c.ACLMTU)
+		if j > len(buf) {
+			j = len(buf)
+		}
+
+		p := &ACLDataPacket{
+			ConnectionHandle:   c.ConnectionHandle,
+			PacketBoundaryFlag: pb,
+			Payload:            buf[i:j],
+		}
+		if err := c.WritePacket(p); err != nil {
+			return 0, err
+		}
+	}
+	return len(buf), nil
+}
+
+func (c *Conn) WritePacket(p Packet) error {
+	c.ACLPacketsRemainingCond.L.Lock()
+	for c.ACLPacketsRemaining == 0 {
+		c.ACLPacketsRemainingCond.Wait()
+	}
+	c.ACLPacketsRemaining--
+	c.ACLPacketsPending[c.ConnectionHandle]++
+	c.ACLPacketsRemainingCond.L.Unlock()
+	return c.Socket.WritePacket(p)
 }

@@ -140,7 +140,7 @@ func (s *Socket) ReadPacket() (Packet, error) {
 	if err != nil {
 		return nil, err
 	}
-	zap.L().Debug("bluetooth reading", zap.ByteString("packet", buf[:n]))
+	zap.L().Debug("bluetooth reading", zap.String("packet", fmt.Sprintf("%x", buf[:n])))
 	return Unmarshal(buf[:n])
 }
 
@@ -149,7 +149,7 @@ func (s *Socket) WritePacket(p Packet) error {
 	if err != nil {
 		return err
 	}
-	zap.L().Debug("bluetooth writing", zap.ByteString("packet", buf))
+	zap.L().Debug("bluetooth writing", zap.String("packet", fmt.Sprintf("%x", buf)))
 	_, err = s.Write(buf)
 	return err
 }

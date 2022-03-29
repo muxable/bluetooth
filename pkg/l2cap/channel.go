@@ -4,8 +4,6 @@ import (
 	"encoding/binary"
 	"io"
 	"sync"
-
-	"github.com/muxable/bluetooth/pkg/hci"
 )
 
 type ConnectionOrientedChannel struct {
@@ -30,9 +28,13 @@ type ConnectionOrientedChannel struct {
 	rxCh              chan []byte
 }
 
+type ApprovedConnectionOrientedChannel struct {
+	*ConnectionOrientedChannel
+}
+
 // this api is a bit strange because we need to actually ack connections.
 
-func (c *ConnectionOrientedChannel) Approve(initiallyPaused bool, rxMTU uint16) error {
+func (c *ConnectionOrientedChannel) Approve(initiallyPaused bool, rxMTU uint16) (*ApprovedConnectionOrientedChannel, error) {
 	c.RxMTU = rxMTU
 	c.RxMPS = rxMTU
 	if c.RxMPS > 1004 {
@@ -49,9 +51,11 @@ func (c *ConnectionOrientedChannel) Approve(initiallyPaused bool, rxMTU uint16) 
 		Result:         LECreditBasedConnectionResultSuccessful,
 	}
 
-	c.L2CAPConn.cocs[c.RxCID] = c
+	a := &ApprovedConnectionOrientedChannel{ConnectionOrientedChannel: c}
 
-	return c.L2CAPConn.writeSignallingPacket(ChannelIDSignallingLEU, r)
+	c.L2CAPConn.cocs[c.RxCID] = a
+
+	return a, c.L2CAPConn.writeSignallingPacket(ChannelIDSignallingLEU, r)
 }
 
 func (c *ConnectionOrientedChannel) Reject(result LECreditBasedConnectionResult) error {
@@ -108,7 +112,7 @@ func (c *ConnectionOrientedChannel) receive(buf []byte) error {
 	return nil
 }
 
-func (c *ConnectionOrientedChannel) Read(buf []byte) (int, error) {
+func (c *ApprovedConnectionOrientedChannel) Read(buf []byte) (int, error) {
 	b, ok := <-c.rxCh
 	if !ok {
 		return 0, io.EOF
@@ -119,18 +123,13 @@ func (c *ConnectionOrientedChannel) Read(buf []byte) (int, error) {
 	return copy(buf, b), nil
 }
 
-func (c *ConnectionOrientedChannel) Write(buf []byte) (int, error) {
+func (c *ApprovedConnectionOrientedChannel) Write(buf []byte) (int, error) {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
 
-	buf = append([]byte{0, 0}, buf...)
-	binary.LittleEndian.PutUint16(buf, uint16(len(buf)-2))
-	f := &BFrame{ChannelID: c.TxCID, Payload: buf}
-	fbuf, err := f.Marshal()
-	if err != nil {
-		return 0, err
-	}
-	for i := 0; i < len(fbuf); i += int(c.TxMPS) {
+	sdu := append([]byte{0, 0}, buf...)
+	binary.LittleEndian.PutUint16(sdu, uint16(len(sdu)-2))
+	for i := 0; i < len(sdu); i += int(c.TxMPS) {
 		c.txCreditSemaphore.L.Lock()
 		for c.TxCredits == 0 {
 			c.txCreditSemaphore.Wait()
@@ -139,28 +138,25 @@ func (c *ConnectionOrientedChannel) Write(buf []byte) (int, error) {
 
 		c.TxCredits--
 
-		var packetBoundary uint8
-		if i > 0 {
-			packetBoundary = 0x01
-		}
-
 		j := i + int(c.TxMPS)
-		if j > len(fbuf) {
-			j = len(fbuf)
+		if j > len(sdu) {
+			j = len(sdu)
+		}
+		
+		f := &BFrame{ChannelID: c.TxCID, Payload: sdu[i:j]}
+		fbuf, err := f.Marshal()
+		if err != nil {
+			return 0, err
 		}
 
-		if err := c.L2CAPConn.HCIConn.Socket.WritePacket(&hci.ACLDataPacket{
-			ConnectionHandle:   c.L2CAPConn.HCIConn.ConnectionHandle,
-			PacketBoundaryFlag: packetBoundary,
-			Payload:            fbuf[i:j],
-		}); err != nil {
+		if _, err := c.L2CAPConn.HCIConn.Write(fbuf); err != nil {
 			return 0, err
 		}
 	}
 	return len(buf), nil
 }
 
-func (c *ConnectionOrientedChannel) Close() error {
+func (c *ApprovedConnectionOrientedChannel) Close() error {
 	close(c.rxCh)
 	return nil
 }

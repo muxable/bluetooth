@@ -46,6 +46,9 @@ func Unmarshal(buf []byte) (Packet, error) {
 				}
 				return p, nil
 			}
+		case EventCodeDisconnectionComplete:
+			p := &DisconnectionCompleteEventPacket{}
+			return p, p.Unmarshal(buf)
 		case EventCodeNumberOfCompletedPackets:
 			p := &NumberOfCompletedPacketsEventPacket{}
 			return p, p.Unmarshal(buf)
@@ -205,7 +208,7 @@ func (p *NumberOfCompletedPacketsEventPacket) Unmarshal(buf []byte) error {
 	p.NumCompletedPackets = make([]uint16, p.NumHandles)
 	for i := 0; i < int(p.NumHandles); i++ {
 		p.ConnectionHandles[i] = binary.LittleEndian.Uint16(buf[4+i*2 : 4+i*2+2])
-		p.NumCompletedPackets[i] = binary.LittleEndian.Uint16(buf[4+int(p.NumHandles)+i*2 : 4+int(p.NumHandles)+i*2+2])
+		p.NumCompletedPackets[i] = binary.LittleEndian.Uint16(buf[4+(int(p.NumHandles)+i)*2 : 4+(int(p.NumHandles)+i)*2+2])
 	}
 	return nil
 }
@@ -221,8 +224,37 @@ func (p *NumberOfCompletedPacketsEventPacket) Marshal() ([]byte, error) {
 	buf[3] = byte(p.NumHandles)
 	for i := 0; i < int(p.NumHandles); i++ {
 		binary.LittleEndian.PutUint16(buf[4+i*2:], p.ConnectionHandles[i])
-		binary.LittleEndian.PutUint16(buf[4+int(p.NumHandles)+i*2:], p.NumCompletedPackets[i])
+		binary.LittleEndian.PutUint16(buf[4+(int(p.NumHandles)+i)*2:], p.NumCompletedPackets[i])
 	}
+	return buf, nil
+}
+
+type DisconnectionCompleteEventPacket struct {
+	Status uint8
+	ConnectionHandle uint16
+	Reason           uint8
+}
+
+func (p *DisconnectionCompleteEventPacket) Unmarshal(buf []byte) error {
+	if buf[0] != byte(PacketTypeEvent) || buf[1] != byte(EventCodeDisconnectionComplete) {
+		return errors.New("incorrect packet")
+	}
+	if len(buf) != 6 {
+		return io.ErrShortBuffer
+	}
+	p.Status = buf[2]
+	p.ConnectionHandle = binary.LittleEndian.Uint16(buf[3:])
+	p.Reason = buf[5]
+	return nil
+}
+
+func (p *DisconnectionCompleteEventPacket) Marshal() ([]byte, error) {
+	buf := make([]byte, 6)
+	buf[0] = byte(PacketTypeEvent)
+	buf[1] = byte(EventCodeDisconnectionComplete)
+	buf[2] = p.Status
+	binary.LittleEndian.PutUint16(buf[3:], p.ConnectionHandle)
+	buf[5] = p.Reason
 	return buf, nil
 }
 

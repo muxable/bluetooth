@@ -2,24 +2,24 @@ package l2cap
 
 import (
 	"errors"
-	"log"
 	"math"
 	"sync"
 
 	"github.com/muxable/bluetooth/pkg/hci"
+	"go.uber.org/zap"
 )
 
 type Conn struct {
 	HCIConn *hci.Conn
 
-	cocs          map[ChannelID]*ConnectionOrientedChannel
+	cocs          map[ChannelID]*ApprovedConnectionOrientedChannel
 	nextChannelID ChannelID
 }
 
 func NewConn(conn *hci.Conn) *Conn {
 	c := &Conn{
 		HCIConn:       conn,
-		cocs:          make(map[ChannelID]*ConnectionOrientedChannel),
+		cocs:          make(map[ChannelID]*ApprovedConnectionOrientedChannel),
 		nextChannelID: 0x40,
 	}
 	return c
@@ -157,14 +157,13 @@ func (c *Conn) Accept() (*ConnectionOrientedChannel, error) {
 					}
 				default:
 					// this is an internal error that we should handle.
-					log.Printf("got unknown signalling packet %#v", p)
 					return nil, errors.New("unhandled packet type")
 				}
 			default:
 				if coc, ok := c.cocs[f.ChannelID]; ok {
 					coc.receive(f.Payload)
 				} else {
-					log.Printf("warning: got data for unknown channel %d", f.ChannelID)
+					zap.L().Warn("received packet for unknown channel", zap.Uint16("channel", uint16(f.ChannelID)))
 				}
 				// this is an external channel.
 			}
