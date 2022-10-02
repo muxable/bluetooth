@@ -12,6 +12,7 @@ import (
 type Adapter struct {
 	*Socket
 
+	onPacketLock sync.Mutex
 	onPacket map[string]func(Packet, error)
 
 	ACLMTU                  uint16
@@ -32,9 +33,11 @@ func NewConn(s *Socket) *Adapter {
 		for {
 			p, err := a.ReadPacket()
 			if err != nil {
+				a.onPacketLock.Lock()
 				for _, cb := range a.onPacket {
-					cb(nil, err)
+					go cb(nil, err)
 				}
+				a.onPacketLock.Unlock()
 				return
 			}
 			switch p := p.(type) {
@@ -52,9 +55,11 @@ func NewConn(s *Socket) *Adapter {
 				a.ACLPacketsRemainingCond.Broadcast()
 				a.ACLPacketsRemainingCond.L.Unlock()
 			}
+			a.onPacketLock.Lock()
 			for _, cb := range a.onPacket {
-				cb(p, nil)
+				go cb(p, nil)
 			}
+			a.onPacketLock.Unlock()
 		}
 	}()
 	return a
@@ -64,6 +69,7 @@ func (a *Adapter) op(p CommandPacket) ([]byte, error) {
 	done := make(chan []byte)
 	defer close(done)
 	id := uuid.NewString()
+	a.onPacketLock.Lock()
 	a.onPacket[id] = func(q Packet, err error) {
 		if err != nil {
 			done <- nil
@@ -74,10 +80,13 @@ func (a *Adapter) op(p CommandPacket) ([]byte, error) {
 			if q.CommandOpcode != p.Opcode() {
 				return
 			}
+			a.onPacketLock.Lock()
 			delete(a.onPacket, id)
+			a.onPacketLock.Unlock()
 			done <- q.ReturnParameters
 		}
 	}
+	a.onPacketLock.Unlock()
 	if err := a.WritePacket(p); err != nil {
 		return nil, err
 	}
@@ -210,6 +219,7 @@ func (a *Adapter) Accept() (*Conn, error) {
 	errch := make(chan error)
 	defer close(errch)
 	id := uuid.NewString()
+	a.onPacketLock.Lock()
 	a.onPacket[id] = func(p Packet, err error) {
 		if err != nil {
 			errch <- err
@@ -217,7 +227,9 @@ func (a *Adapter) Accept() (*Conn, error) {
 		}
 		switch p := p.(type) {
 		case *LEConnectionCompleteEventPacket:
+			a.onPacketLock.Lock()
 			delete(a.onPacket, id)
+			a.onPacketLock.Unlock()
 			c := &Conn{
 				Adapter:              a,
 				ConnectionHandle:     p.ConnectionHandle,
@@ -234,6 +246,7 @@ func (a *Adapter) Accept() (*Conn, error) {
 			go func() {
 				cid := uuid.NewString()
 				var buf []byte
+				a.onPacketLock.Lock()
 				a.onPacket[cid] = func(q Packet, err error) {
 					if err != nil {
 						c.errCh <- err
@@ -242,7 +255,9 @@ func (a *Adapter) Accept() (*Conn, error) {
 					switch q := q.(type) {
 					case *DisconnectionCompleteEventPacket:
 						if q.ConnectionHandle == c.ConnectionHandle {
+							a.onPacketLock.Lock()
 							delete(a.onPacket, cid)
+							a.onPacketLock.Unlock()
 						}
 					case *ACLDataPacket:
 						if q.ConnectionHandle != p.ConnectionHandle {
@@ -271,10 +286,12 @@ func (a *Adapter) Accept() (*Conn, error) {
 						}
 					}
 				}
+				a.onPacketLock.Unlock()
 			}()
 			conn <- c
 		}
 	}
+	a.onPacketLock.Unlock()
 	select {
 	case c := <-conn:
 		return c, nil
